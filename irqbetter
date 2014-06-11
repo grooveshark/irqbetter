@@ -1,0 +1,319 @@
+#!/usr/bin/ruby
+
+class Interrupt
+  attr_reader :type, :name, :affinity, :id, :hint
+
+  def initialize(id, name, type, affinity, hint)
+    @id = id
+    @name = name
+    @type = type
+    @affinity = affinity
+    @hint = hint
+  end
+
+  # Returns string format with smp_affinity if argument is "smp"
+  # or affinity_hint if "hint"
+  def to_s(type = "smp")
+    case type
+    when "smp"
+      "#{@id}:\t#{@affinity.to_binary}\t#{@type}\t#{@name}"
+    when "hint"
+      "#{@id}:\t#{@hint.to_binary}\t#{@type}\t#{@name}"
+    else
+      raise(ArgumentError, 'Argument must be "smp" or "hint"')
+    end
+  end
+end
+
+# TODO get rid of proc_count from this class
+class Interrupts
+  @@proc_count = `cat /proc/cpuinfo| grep '^processor' | wc -l`.to_i
+
+  def initialize
+    @interrupts = {}
+    @name_to_id = {}
+
+    proc_interrupts = File.read("/proc/interrupts")
+    # Used [ \t]* instead of \s before the name because \s will match newlines and sometimes the name doesn't
+    # exist causing the name to get the whole next line
+    proc_interrupts.scan(/^\s*(\d+):(\s+\d+){#{@@proc_count}}\s+([^\s]+)+(.*)$/) do |id, blah, type, name|
+      id = id.to_i
+      hint = nil
+      begin
+        hint = Hint.new(id)
+      rescue
+      end
+      @interrupts[id] = Interrupt.new(id, name, type, Affinity.new(id), hint)
+      @name_to_id[name] = @name_to_id.has_key?(name) ? false : id
+    end
+  end
+
+
+  def to_s(affinity = "smp")
+    str = ""
+    # The order of the hash is not consistent in Ruby 1.8.7 so sort
+    @interrupts.keys.sort.each do |id|
+      str += @interrupts[id].to_s(affinity) + "\n"
+    end
+    return str
+  end
+
+  def print(type = "smp")
+    str = "CPU:\t"
+    (@@proc_count-1).downto(0).each do |cpu|
+      str += sprintf("%2s", cpu)
+    end
+    str += "\n"
+    # The order of the hash is not consistent in Ruby 1.8.7 so sort
+    @interrupts.keys.sort.each do |id|
+      irq = @interrupts[id]
+      case type
+      when "smp"
+        affinity = irq.affinity.to_binary.gsub(/0/, ' .').gsub(/1/, ' 1')
+      when "hint"
+        affinity = irq.hint.to_binary.gsub(/0/, ' .').gsub(/1/, ' 1')
+      else
+        raise(ArgumentError, 'Argument must be "smp" or "hint"')
+      end
+      str += "#{irq.id}:\t#{affinity}\t#{irq.type}\t#{irq.name}\n"
+    end
+    printf(str)
+  end
+
+  # If key is a int, key is treated as an id.  Otherwise, key is treated as a name.
+  # If the name is not unique, returns false
+  def [](key)
+    return @interrupts[key] if key.is_a? Integer
+
+    if @name_to_id.has_key?(key) && @name_to_id[key]
+      return @interrupts[@name_to_id[key]]
+    end
+
+    return @name_to_id[key]
+  end
+
+  def []=(key, value)
+    raise(ArgumentError, "Must be a type Interrupt") unless value.is_a? Interrupt
+
+    if key.is_a? Integer
+      raise(ArgumentError, "Interrupt ID does not exist") unless @interrupts.has_key?(key)
+      @interrupts[key] = value
+    end
+
+    raise(ArgumentError, "No interrupt with name #{key}") unless @name_to_id.has_key?(key)
+    raise(ArgumentError, "More than one interrupt with name #{key}") unless @name_to_id[key]
+
+    @interrupts[@name_to_id[key]] = value
+  end
+
+  def names
+    @name_to_id.keys
+  end
+
+  # Returns an array of Interrupt which block returns true value
+  def map(&block)
+    raise(ArgumentError, "No block was given") unless block_given?
+    raise(ArgumentError, "Block must have one or four arguments") unless block.arity.eql?(1)
+
+    filtered = []
+    @interrupts.each do |id, interrupt|
+      filtered << interrupt if block.call(interrupt)
+    end
+    return filtered
+  end
+
+  def save
+    @interrupts.each {|i| i.save}
+  end
+end
+
+class Affinity
+  @@proc_count = `cat /proc/cpuinfo| grep '^processor' | wc -l`.to_i
+
+  attr_reader :id, :mask
+
+  def initialize(id)
+    if @@proc_count > 32
+      raise "#{self.class} class cannot handle over 32 processors"
+    end
+
+    if not File.file?("/proc/irq/#{id}/smp_affinity")
+      raise "#{id} is not a valid interrupt"
+    end
+
+    @id = id
+
+    smp_affinity = File.read("/proc/irq/#{id}/smp_affinity")
+    if not smp_affinity =~ /^[0-9a-fA-F]+$/
+      raise "Failed to get affinity for interrupt #{id}"
+    end
+    proc_mask = ("1" * @@proc_count).to_i(2)
+    @mask = smp_affinity.to_i(16) & proc_mask
+  end
+
+  def to_binary
+    str = @mask.to_s(2)
+    pad_length = @@proc_count - str.length
+    pad_length = 0 if pad_length < 0
+    return "0" * pad_length + str
+  end
+
+  def to_hex
+    str = @mask.to_s(16)
+    pad_length = (@@proc_count / 4.0).ceil - str.length
+    pad_length = 0 if pad_length < 0
+    return "0" * pad_length + str
+  end
+
+  # Sets affinity to the corect mask for array of processors
+  def set_procs(processors)
+    @mask = self.class.create_mask(processors)
+  end
+
+  # Sets affinity to processor, wraps around if processor number too large
+  def set_proc_wrap(processor)
+    processor = (processor < @@proc_count) ? processor.to_i : (processor % @@proc_count)
+    @mask = self.class.create_mask([processor])
+  end
+
+  def save
+    File.open("/proc/irq/#{@id}/smp_affinity", 'w') {|f| f.write(@mask)}
+  end
+
+  def self.create_mask(processors)
+    mask = 0
+    processors.each do |processor|
+      if processor >= @@proc_count
+        raise "Processor #{processor} does not exists"
+      end
+
+      mask = mask | (1 << processor)
+    end
+    return mask
+  end
+end
+
+
+class Hint < Affinity
+  def initialize(id)
+    if @@proc_count > 32
+      raise "#{self.class} class cannot handle over 32 processors"
+    end
+
+    if not File.exist?("/proc/irq/#{id}")
+      raise "#{id} is not a valid interrupt"
+    end
+
+    @id = id
+
+    @mask = 0
+    if File.file?("/proc/irq/#{id}/affinity_hint")
+      hint = File.read("/proc/irq/#{id}/affinity_hint")
+      if not hint =~ /^[0-9a-fA-F]+$/
+        raise "Failed to get affinity for interrupt #{id}"
+      end
+      proc_mask = ("1" * @@proc_count).to_i(2)
+      @mask = hint.to_i(16) & proc_mask
+    end
+  end
+end
+
+def irq_sort(irqs)
+  irqs.sort do |a, b|
+    a.gsub(/^[A-Za-z0-9]+.*?(\d+).*/, '\1').to_i <=> b.gsub(/^[A-Za-z0-9]+.*?(\d+).*/, '\1').to_i
+  end
+end
+
+test_flag = false
+print_flag = false
+hint_flag = false
+ahci_flag = true
+devices = []
+ARGV.each do |arg|
+  case arg
+  when "-h", "--help"
+    puts """Usage:
+  #{__FILE__} [OPTIONS] INTERFACE [INTERFACE]...
+
+Description:
+  This script attempts to bind each queue interrupt of a multi-queue
+  NICs each to a different core.  If the NIC has seperate tx and rx
+  queues, it will bind each set to the same core, ie:
+  tx0|rx0 --> cpu0, tx1|rx1 --> cpu1.
+
+Options:
+  -t, --test    show what the affinities of each interrupt will be
+                before and after running the script without actually
+                changing them
+  -p, --print   show the affinities found in /proc/irq/*/smp_affinity
+      --hint    show the hints found in /proc/irq/*/affinity_hint
+  -h, --help    show this help"""
+    exit
+  when "-t", "--test"
+    test_flag = true
+  when "-p", "--print"
+    print_flag = true
+  when "--hint"
+    hint_flag = true
+  when "--no-ahci"
+    ahci_flag = false
+  else
+    devices << arg
+  end
+end
+
+# Print out warning if irqbalance is running
+if Kernel.system("ps ax | grep -v grep | grep -q irqbalance")
+  puts "WARNING: irqbalance is running and will likely override this script's affinitization."
+end
+
+interrupts = Interrupts.new
+
+if print_flag
+  puts "CURRENT AFFINITIES"
+  interrupts.print
+  exit
+end
+
+if hint_flag
+  puts "CURRENT HINTS"
+  interrupts.print("hint")
+  exit
+end
+
+puts "BEFORE"
+interrupts.print
+
+if print_flag
+  exit
+end
+
+counter = 0
+
+devices.each do |dev|
+  # Find all TxRx queues
+  txrx = interrupts.names.select {|n| n =~ /^#{dev}-TxRx-\d+$|^#{dev}:v\d+-TxRx$|^#{dev}-\d+$/i}
+  irq_sort(txrx).each do |name|
+    interrupts[name].affinity.set_proc_wrap(counter)
+    counter += 1
+  end
+  # Save counter so that we can start at the same core with the Tx's
+  tx_counter = counter
+  # Find all Rx queues
+  rx = interrupts.names.select {|n| n =~ /#{dev}-Rx-\d+|#{dev}:v\d+-Rx/i}
+  irq_sort(rx).each do |n|
+    interrupts[n].affinity.set_proc_wrap(counter)
+    counter += 1
+  end
+  # Find all Tx queues
+  tx = interrupts.names.select{|n| n =~ /#{dev}-Tx-\d+|#{dev}:v\d+-Tx/i}
+  irq_sort(tx).each do |n|
+    interrupts[n].affinity.set_proc_wrap(tx_counter)
+    tx_counter += 1
+    counter = tx_counter if tx_counter > counter
+  end
+end
+
+puts "AFTER"
+interrupts.print
+interrupts.save unless test_flag
