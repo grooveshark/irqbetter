@@ -1,5 +1,7 @@
 #!/usr/bin/ruby
 
+PROC_COUNT=`cat /proc/cpuinfo| grep '^processor' | wc -l`.to_i
+
 class Interrupt
   attr_reader :type, :name, :affinity, :id, :hint
 
@@ -25,10 +27,7 @@ class Interrupt
   end
 end
 
-# TODO get rid of proc_count from this class
 class Interrupts
-  @@proc_count = `cat /proc/cpuinfo| grep '^processor' | wc -l`.to_i
-
   def initialize
     @interrupts = {}
     @name_to_id = {}
@@ -36,7 +35,7 @@ class Interrupts
     proc_interrupts = File.read("/proc/interrupts")
     # Used [ \t]* instead of \s before the name because \s will match newlines and sometimes the name doesn't
     # exist causing the name to get the whole next line
-    proc_interrupts.scan(/^\s*(\d+):(\s+\d+){#{@@proc_count}}\s+([^\s]+)+(.*)$/) do |id, blah, type, name|
+    proc_interrupts.scan(/^\s*(\d+):(\s+\d+){#{PROC_COUNT}}\s+([^\s]+)+(.*)$/) do |id, blah, type, name|
       id = id.to_i
       hint = nil
       begin
@@ -60,7 +59,7 @@ class Interrupts
 
   def print(type = "smp")
     str = "CPU:\t"
-    (@@proc_count-1).downto(0).each do |cpu|
+    (PROC_COUNT-1).downto(0).each do |cpu|
       str += sprintf("%2s", cpu)
     end
     str += "\n"
@@ -127,13 +126,12 @@ class Interrupts
   end
 end
 
+# TODO: handle more than 32 processors
 class Affinity
-  @@proc_count = `cat /proc/cpuinfo| grep '^processor' | wc -l`.to_i
-
   attr_reader :id, :mask
 
   def initialize(id)
-    if @@proc_count > 32
+    if PROC_COUNT > 32
       raise "#{self.class} class cannot handle over 32 processors"
     end
 
@@ -147,20 +145,20 @@ class Affinity
     if not smp_affinity =~ /^[0-9a-fA-F]+$/
       raise "Failed to get affinity for interrupt #{id}"
     end
-    proc_mask = ("1" * @@proc_count).to_i(2)
+    proc_mask = ("1" * PROC_COUNT).to_i(2)
     @mask = smp_affinity.to_i(16) & proc_mask
   end
 
   def to_binary
     str = @mask.to_s(2)
-    pad_length = @@proc_count - str.length
+    pad_length = PROC_COUNT - str.length
     pad_length = 0 if pad_length < 0
     return "0" * pad_length + str
   end
 
   def to_hex
     str = @mask.to_s(16)
-    pad_length = (@@proc_count / 4.0).ceil - str.length
+    pad_length = (PROC_COUNT / 4.0).ceil - str.length
     pad_length = 0 if pad_length < 0
     return "0" * pad_length + str
   end
@@ -172,18 +170,18 @@ class Affinity
 
   # Sets affinity to processor, wraps around if processor number too large
   def set_proc_wrap(processor)
-    processor = (processor < @@proc_count) ? processor.to_i : (processor % @@proc_count)
+    processor = (processor < PROC_COUNT) ? processor.to_i : (processor % PROC_COUNT)
     @mask = self.class.create_mask([processor])
   end
 
   def save
-    File.open("/proc/irq/#{@id}/smp_affinity", 'w') {|f| f.write(@mask)}
+    File.open("/proc/irq/#{@id}/smp_affinity", 'w') {|f| f.write(self.to_hex)}
   end
 
   def self.create_mask(processors)
     mask = 0
     processors.each do |processor|
-      if processor >= @@proc_count
+      if processor >= PROC_COUNT
         raise "Processor #{processor} does not exists"
       end
 
@@ -196,7 +194,7 @@ end
 
 class Hint < Affinity
   def initialize(id)
-    if @@proc_count > 32
+    if PROC_COUNT > 32
       raise "#{self.class} class cannot handle over 32 processors"
     end
 
@@ -212,7 +210,7 @@ class Hint < Affinity
       if not hint =~ /^[0-9a-fA-F]+$/
         raise "Failed to get affinity for interrupt #{id}"
       end
-      proc_mask = ("1" * @@proc_count).to_i(2)
+      proc_mask = ("1" * PROC_COUNT).to_i(2)
       @mask = hint.to_i(16) & proc_mask
     end
   end
@@ -336,4 +334,8 @@ end
 
 print_header("Updated Affinities")
 interrupts.print
-interrupts.save unless test_flag
+if test_flag
+  puts ("\nNOTE: running in test mode, affinities not modified")
+else
+  interrupts.save unless test_flag
+end
