@@ -123,7 +123,7 @@ class Interrupts
   end
 
   def save
-    @interrupts.each {|i| i.save}
+    @interrupts.each {|id, irq| irq.affinity.save}
   end
 end
 
@@ -224,14 +224,20 @@ def irq_sort(irqs)
   end
 end
 
-test_flag = false
-print_flag = false
-hint_flag = false
-ahci_flag = true
-devices = []
-ARGV.each do |arg|
-  case arg
-  when "-h", "--help"
+def print_header(header, width = 50)
+  # Subtract two for the spaces on either side
+  pad = (width - header.length - 2) / 2.0
+  if pad > 1
+    # Padding
+    left = "-" * pad.ceil
+    right = "-" * pad.floor
+    puts left + " #{header} " + right
+  else
+    puts "- #{header} -"
+  end
+end
+
+def print_help
     puts """Usage:
   #{__FILE__} [OPTIONS] INTERFACE [INTERFACE]...
 
@@ -248,6 +254,19 @@ Options:
   -p, --print   show the affinities found in /proc/irq/*/smp_affinity
       --hint    show the hints found in /proc/irq/*/affinity_hint
   -h, --help    show this help"""
+end
+
+# Various option flags and array a device array to store all the INTERFACE arguments in
+test_flag = false
+print_flag = false
+hint_flag = false
+devices = []
+
+# Parse argument
+ARGV.each do |arg|
+  case arg
+  when "-h", "--help"
+    print_help
     exit
   when "-t", "--test"
     test_flag = true
@@ -255,8 +274,10 @@ Options:
     print_flag = true
   when "--hint"
     hint_flag = true
-  when "--no-ahci"
-    ahci_flag = false
+  when /^-/
+    puts "ERROR: unrecognized option #{arg}\n\n"
+    print_help
+    exit 1
   else
     devices << arg
   end
@@ -264,32 +285,31 @@ end
 
 # Print out warning if irqbalance is running
 if Kernel.system("ps ax | grep -v grep | grep -q irqbalance")
-  puts "WARNING: irqbalance is running and will likely override this script's affinitization."
+  puts "WARNING: irqbalance is running and will likely override this script's affinitization.\n\n"
 end
 
 interrupts = Interrupts.new
 
-if print_flag
-  puts "CURRENT AFFINITIES"
-  interrupts.print
-  exit
-end
-
 if hint_flag
-  puts "CURRENT HINTS"
+  print_header("Affinity Hints")
   interrupts.print("hint")
   exit
 end
 
-puts "BEFORE"
+print_header("Current Affinities")
 interrupts.print
 
-if print_flag
-  exit
+exit if print_flag
+
+if devices.length == 0
+  puts "\nERROR: must specify atleast one INTERFACE"
+  exit 1
 end
 
+# Counter to keep track which core to assign the next interrupt to
 counter = 0
 
+# Spread all the
 devices.each do |dev|
   # Find all TxRx queues
   txrx = interrupts.names.select {|n| n =~ /^#{dev}-TxRx-\d+$|^#{dev}:v\d+-TxRx$|^#{dev}-\d+$/i}
@@ -314,6 +334,6 @@ devices.each do |dev|
   end
 end
 
-puts "AFTER"
+print_header("Updated Affinities")
 interrupts.print
 interrupts.save unless test_flag
