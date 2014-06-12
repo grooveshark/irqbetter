@@ -35,7 +35,9 @@ class Interrupts
     proc_interrupts = File.read("/proc/interrupts")
     # Used [ \t]* instead of \s before the name because \s will match newlines and sometimes the name doesn't
     # exist causing the name to get the whole next line
-    proc_interrupts.scan(/^\s*(\d+):(\s+\d+){#{PROC_COUNT}}\s+([^\s]+)+(.*)$/) do |id, blah, type, name|
+    proc_interrupts.scan(/^\s*(\d+):(\s+\d+){#{PROC_COUNT}}\s+([^\s]+)[ \t]*(.*)$/) do |id, blah, type, name|
+      # Just to be safe
+      type.strip! && name.strip!
       id = id.to_i
       hint = nil
       begin
@@ -307,35 +309,49 @@ end
 # Counter to keep track which core to assign the next interrupt to
 counter = 0
 
-# Spread all the
+# Store any devices that no interrupts where found for
+faild_devices = []
+# Spread all the interrupts
 devices.each do |dev|
+  found_irq_flag = false
   # Find all TxRx queues
   txrx = interrupts.names.select {|n| n =~ /^#{dev}-TxRx-\d+$|^#{dev}:v\d+-TxRx$|^#{dev}-\d+$/i}
-  irq_sort(txrx).each do |name|
-    interrupts[name].affinity.set_proc_wrap(counter)
+  found_irq_flag = true if txrx.length > 0
+  irq_sort(txrx).each do |n|
+    puts n
+    interrupts[n].affinity.set_proc_wrap(counter)
     counter += 1
   end
   # Save counter so that we can start at the same core with the Tx's
   tx_counter = counter
   # Find all Rx queues
   rx = interrupts.names.select {|n| n =~ /#{dev}-Rx-\d+|#{dev}:v\d+-Rx/i}
+  found_irq_flag = true if rx.length > 0
   irq_sort(rx).each do |n|
     interrupts[n].affinity.set_proc_wrap(counter)
     counter += 1
   end
   # Find all Tx queues
   tx = interrupts.names.select{|n| n =~ /#{dev}-Tx-\d+|#{dev}:v\d+-Tx/i}
+  found_irq_flag = true if tx.length > 0
   irq_sort(tx).each do |n|
     interrupts[n].affinity.set_proc_wrap(tx_counter)
     tx_counter += 1
     counter = tx_counter if tx_counter > counter
   end
+  faild_devices << dev if not found_irq_flag
 end
 
 print_header("Updated Affinities")
 interrupts.print
+puts
+
+faild_devices.each do |dev|
+  puts "WARNING: no interrupts found for interface '#{dev}'"
+end
+
 if test_flag
-  puts ("\nNOTE: running in test mode, affinities not modified")
+  puts ("NOTE: running in test mode, affinities not modified")
 else
   interrupts.save unless test_flag
 end
