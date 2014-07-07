@@ -1,6 +1,7 @@
 irqbetter
 =========
 
+```
 Usage:
   ./irqbetter [OPTIONS] INTERFACE [INTERFACE]...
 
@@ -17,3 +18,4 @@ Options:
   -p, --print   show the affinities found in /proc/irq/*/smp_affinity
       --hint    show the hints found in /proc/irq/*/affinity_hint
   -h, --help    show this help
+```
