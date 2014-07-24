@@ -128,15 +128,10 @@ class Interrupts
   end
 end
 
-# TODO: handle more than 32 processors
 class Affinity
-  attr_reader :id, :mask
+  attr_reader :id, :mask, :format
 
   def initialize(id)
-    if PROC_COUNT > 32
-      raise "#{self.class} class cannot handle over 32 processors"
-    end
-
     if not File.file?("/proc/irq/#{id}/smp_affinity")
       raise "#{id} is not a valid interrupt"
     end
@@ -144,25 +139,41 @@ class Affinity
     @id = id
 
     smp_affinity = File.read("/proc/irq/#{id}/smp_affinity")
-    if not smp_affinity =~ /^[0-9a-fA-F]+$/
+    if not smp_affinity =~ /^[0-9a-fA-F,]+$/
       raise "Failed to get affinity for interrupt #{id}"
     end
+    @format = smp_affinity
     proc_mask = ("1" * PROC_COUNT).to_i(2)
-    @mask = smp_affinity.to_i(16) & proc_mask
+    @mask = smp_affinity.gsub(/,/, "").to_i(16) & proc_mask
+  end
+
+  # Prepend zeros to str for up to length len
+  def zero_pad(str, len)
+    pad_length = len - str.length
+    pad_length = 0 if pad_length < 0
+    return "0" * pad_length + str
   end
 
   def to_binary
     str = @mask.to_s(2)
-    pad_length = PROC_COUNT - str.length
-    pad_length = 0 if pad_length < 0
-    return "0" * pad_length + str
+    self.zero_pad(str, PROC_COUNT)
   end
 
   def to_hex
     str = @mask.to_s(16)
-    pad_length = (PROC_COUNT / 4.0).ceil - str.length
-    pad_length = 0 if pad_length < 0
-    return "0" * pad_length + str
+    self.zero_pad(str, (PROC_COUNT / 4.0).ceil)
+  end
+
+  # Returns hex mask in the format that the kernel first gave it to us in.  It seems to somewhat
+  # inconsistent expecially across different kernel version, so instead of asking why I just
+  # emulate whatever the kernel first gave me.
+  def to_proc_format
+    str = @mask.to_s(16)
+    mask = self.zero_pad(str, @format.gsub(/,/, "").length)
+    (0..@format.length).each do |i|
+      mask.insert(i, ",") if @format[i].eql?(",")
+    end
+    return mask
   end
 
   # Sets affinity to the corect mask for array of processors
@@ -177,7 +188,7 @@ class Affinity
   end
 
   def save
-    File.open("/proc/irq/#{@id}/smp_affinity", 'w') {|f| f.write(self.to_hex)}
+    File.open("/proc/irq/#{@id}/smp_affinity", 'w') {|f| f.write(self.to_proc_format)}
   end
 
   def self.create_mask(processors)
@@ -196,10 +207,6 @@ end
 
 class Hint < Affinity
   def initialize(id)
-    if PROC_COUNT > 32
-      raise "#{self.class} class cannot handle over 32 processors"
-    end
-
     if not File.exist?("/proc/irq/#{id}")
       raise "#{id} is not a valid interrupt"
     end
@@ -209,11 +216,12 @@ class Hint < Affinity
     @mask = 0
     if File.file?("/proc/irq/#{id}/affinity_hint")
       hint = File.read("/proc/irq/#{id}/affinity_hint")
-      if not hint =~ /^[0-9a-fA-F]+$/
-        raise "Failed to get affinity for interrupt #{id}"
+      if not hint =~ /^[0-9a-fA-F,]+$/
+        raise "Failed to get affinity hint for interrupt #{id}"
       end
+      @format = hint
       proc_mask = ("1" * PROC_COUNT).to_i(2)
-      @mask = hint.to_i(16) & proc_mask
+      @mask = hint.gsub(/,/, "").to_i(16) & proc_mask
     end
   end
 end
